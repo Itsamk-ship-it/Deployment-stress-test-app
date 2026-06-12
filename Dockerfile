@@ -1,56 +1,35 @@
-# syntax=docker/dockerfile:1
-
-############################
-# 1. Install dependencies  #
-############################
-FROM node:20-alpine AS deps
+FROM mirror.gcr.io/library/node:22-alpine AS builder
 WORKDIR /app
-RUN apk add --no-cache libc6-compat openssl
-COPY package.json package-lock.json* ./
+COPY package*.json ./
 COPY prisma ./prisma
-RUN npm install
-
-############################
-# 2. Build the Next.js app #
-############################
-FROM node:20-alpine AS builder
-WORKDIR /app
-RUN apk add --no-cache libc6-compat openssl
-COPY --from=deps /app/node_modules ./node_modules
+RUN npm ci
 COPY . .
-ENV NEXT_TELEMETRY_DISABLED=1
+RUN sed -i "s/output.*'export'/output: 'standalone'/g" next.config.* 2>/dev/null || true
+RUN sed -i "s/output.*\"export\"/output: 'standalone'/g" next.config.* 2>/dev/null || true
+ENV NODE_OPTIONS="--max-old-space-size=8192"
 RUN npx prisma generate && npm run build
 
-############################################
-# 3. Minimal runtime for the Next.js server #
-############################################
-FROM node:20-alpine AS runner
+FROM mirror.gcr.io/library/node:22-alpine
 WORKDIR /app
-RUN apk add --no-cache openssl
 ENV NODE_ENV=production
-ENV NEXT_TELEMETRY_DISABLED=1
-RUN addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001
-
-# Next.js standalone output bundles only what the server needs.
+ENV HOSTNAME=0.0.0.0
+ENV PORT=3000
 COPY --from=builder /app/public ./public
-COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
-COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/prisma ./prisma
-RUN mkdir -p /app/uploads && chown -R nextjs:nodejs /app/uploads
-
-USER nextjs
+RUN mkdir -p /app/uploads
 EXPOSE 3000
-ENV PORT=3000 HOSTNAME=0.0.0.0
-CMD ["node", "server.js"]
 
-############################################
-# 4. Worker image (background job processor) #
-############################################
-FROM node:20-alpine AS worker
-WORKDIR /app
-RUN apk add --no-cache libc6-compat openssl
-ENV NODE_ENV=production
-COPY --from=deps /app/node_modules ./node_modules
-COPY . .
-RUN npx prisma generate
-CMD ["node_modules/.bin/tsx", "src/worker/index.ts"]
+USER root
+RUN printf '%s\n' \
+    '#!/bin/sh' \
+    'if [ -n "$ROOT_URL" ]; then' \
+    '  _h=$(echo "$ROOT_URL" | sed "s|https://||" | sed "s|\.cloud\.nexlayer\.ai||")' \
+    '  _d=$(echo "$_h" | cut -d- -f3-)' \
+    '  export DATABASE_URL="postgresql://postgres:postgres@${_d}-postgres-service:5432/stresstest?schema=public"' \
+    '  export REDIS_URL="redis://${_d}-redis-service:6379"' \
+    'fi' \
+    'exec "$@"' > /nx-start.sh && chmod +x /nx-start.sh
+ENTRYPOINT ["/bin/sh", "/nx-start.sh"]
+CMD ["node", "server.js"]
