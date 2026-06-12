@@ -81,6 +81,7 @@ APP_URL=http://localhost:3000
 | Pod | Variable | Value | Kind |
 |-----|----------|-------|------|
 | `web` | `NODE_ENV` | `production` | plain |
+| `web` | `POD_ROLE` | `web` | plain |
 | `web` | `PORT` | `"3000"` | plain |
 | `web` | `HOSTNAME` | `"0.0.0.0"` | plain |
 | `web` | `APP_URL` | `"<% URL %>"` | plain |
@@ -91,13 +92,13 @@ APP_URL=http://localhost:3000
 | `web` | `EMAIL_FROM` | `"Stress Test <no-reply@stresstest.local>"` | plain |
 | `web` | `UPLOAD_DIR` | `"/app/uploads"` | plain |
 | `worker` | `NODE_ENV` | `production` | plain |
+| `worker` | `POD_ROLE` | `worker` | plain |
 | `worker` | `APP_URL` | `"<% URL %>"` | plain |
 | `worker` | `DATABASE_URL` | `"postgresql://postgres:postgres@${postgres:5432}/stresstest?schema=public"` | inter-pod |
 | `worker` | `REDIS_URL` | `"redis://${redis:6379}"` | inter-pod |
 | `worker` | `WEBHOOK_SECRET` | _(set via Nexlayer dashboard)_ | secret |
 | `worker` | `EMAIL_FROM` | `"Stress Test <no-reply@stresstest.local>"` | plain |
 | `worker` | `UPLOAD_DIR` | `"/app/uploads"` | plain |
-| `worker` | `command` | `"node_modules/.bin/tsx src/worker/index.ts"` | plain |
 | `postgres` | `POSTGRES_USER` | `postgres` | plain |
 | `postgres` | `POSTGRES_PASSWORD` | _(set via Nexlayer dashboard)_ | secret |
 | `postgres` | `POSTGRES_DB` | `stresstest` | plain |
@@ -124,6 +125,7 @@ application:
         - 3000
       vars:
         NODE_ENV: production
+        POD_ROLE: web
         PORT: "3000"
         HOSTNAME: "0.0.0.0"
         APP_URL: "<% URL %>"
@@ -137,13 +139,13 @@ application:
       image: "# filled by pipeline"
       vars:
         NODE_ENV: production
+        POD_ROLE: worker
         APP_URL: "<% URL %>"
         DATABASE_URL: "postgresql://postgres:postgres@${postgres:5432}/stresstest?schema=public"
         REDIS_URL: "redis://${redis:6379}"
         WEBHOOK_SECRET: "change-me-webhook-secret"
         EMAIL_FROM: "Stress Test <no-reply@stresstest.local>"
         UPLOAD_DIR: "/app/uploads"
-      command: "node_modules/.bin/tsx src/worker/index.ts"
     - name: postgres
       image: mirror.gcr.io/library/postgres:16-alpine
       servicePorts:
@@ -192,7 +194,21 @@ application:
 
 ## Build Notes
 <!-- nexlayer:section user-editable=build_notes -->
-<!-- Add notes for future builds here — preserved across re-analysis -->
+**2026-06-12 — deploy fixes (web + worker share one image):**
+
+- Nexlayer builds a single image and patches it into every pod with the
+  `# filled by pipeline` placeholder (`web` and `worker`), and it does **not**
+  honor a `command:` field. So the image runs both roles via a `POD_ROLE`
+  env var: `web` → `node server.js`, `worker` → `tsx src/worker/index.ts`.
+- The runtime image now ships the full `node_modules` (incl. `tsx` + the
+  prisma CLI) and `src/` alongside the Next.js standalone bundle, so the worker
+  and migrations can actually run. The earlier image was web-only, so the
+  worker pod crashed on boot.
+- The `web` role runs `prisma migrate deploy` before starting, so the Postgres
+  schema is created on deploy.
+- Removed the Dockerfile `ROOT_URL` host-rewrite hack — `DATABASE_URL` /
+  `REDIS_URL` come from the `${postgres:5432}` / `${redis:6379}` inter-pod refs
+  in `nexlayer.yaml`.
 <!-- nexlayer:end -->
 
 ## Nexlayer Configuration
@@ -213,6 +229,7 @@ application:
         - 3000
       vars:
         NODE_ENV: production
+        POD_ROLE: web
         PORT: "3000"
         HOSTNAME: "0.0.0.0"
         APP_URL: "<% URL %>"
@@ -226,13 +243,13 @@ application:
       image: "# filled by pipeline"
       vars:
         NODE_ENV: production
+        POD_ROLE: worker
         APP_URL: "<% URL %>"
         DATABASE_URL: "postgresql://postgres:postgres@${postgres:5432}/stresstest?schema=public"
         REDIS_URL: "redis://${redis:6379}"
         WEBHOOK_SECRET: "change-me-webhook-secret"
         EMAIL_FROM: "Stress Test <no-reply@stresstest.local>"
         UPLOAD_DIR: "/app/uploads"
-      command: "node_modules/.bin/tsx src/worker/index.ts"
     - name: postgres
       image: mirror.gcr.io/library/postgres:16-alpine
       servicePorts:
