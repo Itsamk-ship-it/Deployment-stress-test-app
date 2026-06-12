@@ -1,6 +1,6 @@
 # Nexlayer — Deployment-stress-test-app
 
-<!-- nexlayer:meta version=1 analyzed=2026-06-12T16:36:35Z repo=https://github.com/Itsamk-ship-it/Deployment-stress-test-app branch=main -->
+<!-- nexlayer:meta version=1 analyzed=2026-06-12T19:44:04Z repo=https://github.com/Itsamk-ship-it/Deployment-stress-test-app branch=main -->
 
 > **For AI agents (Claude Code, Cursor, Gemini CLI, Copilot):**
 > This file is the **project context** for this Nexlayer deployment — tech stack, env vars, secrets, live URL.
@@ -15,7 +15,7 @@
 
 ## Project Summary
 <!-- nexlayer:section agent-managed=project_summary -->
-A full-stack stress test application designed to exercise platform features including asynchronous background jobs, file uploads, webhooks, and relational data persistence using Next.js, BullMQ, PostgreSQL, and Redis.
+A full-stack stress test application designed to exercise core platform capabilities including background jobs, file uploads, webhooks, and health checks. It utilizes a Next.js frontend/API, a BullMQ worker, PostgreSQL for persistence, and Redis for caching and queueing.
 <!-- nexlayer:end -->
 
 ## Technology Stack
@@ -23,19 +23,21 @@ A full-stack stress test application designed to exercise platform features incl
 | Name | Kind | Version | Detected From |
 |------|------|---------|---------------|
 | Next.js | framework | 14.2.18 | package.json |
-| Node.js | language | 22 | Dockerfile |
+| TypeScript | language | 5.7.2 | package.json |
 | PostgreSQL | database | 16 | docker-compose.yml |
 | Redis | database | 7 | docker-compose.yml |
 | Prisma | tool | 5.22.0 | package.json |
 | BullMQ | infra | 5.34.0 | package.json |
+| Node.js | language | 22-alpine | Dockerfile |
 <!-- nexlayer:end -->
 
 ## Repository Structure
 <!-- nexlayer:section agent-managed=structure_map -->
+- src/ — Application source code (Next.js and Worker)
 - prisma/ — Database schema and migrations
 - src/worker/ — Background job processing logic
 - public/ — Static assets
-- uploads/ — Local file storage for multipart uploads
+- uploads/ — Local file storage for uploaded content
 <!-- nexlayer:end -->
 
 ## External Services Required
@@ -50,9 +52,9 @@ Services that must be configured separately (not deployed by Nexlayer):
 ### Prerequisites
 
 - Node.js >= 20
-- npm >= 10
-- PostgreSQL >= 16
-- Redis >= 7
+- npm
+- PostgreSQL
+- Redis
 
 ### Environment variables
 
@@ -61,16 +63,18 @@ Copy `.env.example` to `.env.local` and fill in:
 ```
 DATABASE_URL=postgresql://postgres:postgres@localhost:5544/stresstest?schema=public
 REDIS_URL=redis://localhost:6380
-AUTH_SECRET=any-string-at-least-32-chars
-WEBHOOK_SECRET=change-me-webhook-secret
+AUTH_SECRET=at-least-32-chars-long-string
+WEBHOOK_SECRET=any-secret-string
+APP_URL=http://localhost:3000
 ```
 
 ### Steps
 
-1. `npm install` — Install dependencies and run prisma generate
-2. `npx prisma migrate dev` — Initialize database schema
-3. `npm run dev` — Start Next.js development server on http://localhost:3000
-4. `npm run worker` — Start the BullMQ worker process
+1. `npm install` — Install project dependencies
+2. `npm run prisma:generate` — Generate Prisma Client
+3. `npm run prisma:migrate` — Run database migrations
+4. `npm run dev` — Start Next.js dev server on http://localhost:3000
+5. `npm run worker:dev` — Start BullMQ worker in watch mode
 
 <!-- nexlayer:end -->
 
@@ -81,9 +85,9 @@ WEBHOOK_SECRET=change-me-webhook-secret
 | Pod | Variable | Value | Kind |
 |-----|----------|-------|------|
 | `web` | `NODE_ENV` | `production` | plain |
-| `web` | `POD_ROLE` | `web` | plain |
 | `web` | `PORT` | `"3000"` | plain |
 | `web` | `HOSTNAME` | `"0.0.0.0"` | plain |
+| `web` | `POD_ROLE` | `web` | plain |
 | `web` | `APP_URL` | `"<% URL %>"` | plain |
 | `web` | `AUTH_SECRET` | _(set via Nexlayer dashboard)_ | secret |
 | `web` | `DATABASE_URL` | `"postgresql://postgres:postgres@${postgres:5432}/stresstest?schema=public"` | inter-pod |
@@ -125,9 +129,9 @@ application:
         - 3000
       vars:
         NODE_ENV: production
-        POD_ROLE: web
         PORT: "3000"
         HOSTNAME: "0.0.0.0"
+        POD_ROLE: web
         APP_URL: "<% URL %>"
         AUTH_SECRET: "change-me-to-a-long-random-string-at-least-32-chars"
         DATABASE_URL: "postgresql://postgres:postgres@${postgres:5432}/stresstest?schema=public"
@@ -137,6 +141,7 @@ application:
         UPLOAD_DIR: "/app/uploads"
     - name: worker
       image: "# filled by pipeline"
+      path: /
       vars:
         NODE_ENV: production
         POD_ROLE: worker
@@ -169,49 +174,27 @@ application:
 
 | Pod | Image | Port | Role |
 |-----|-------|------|------|
-| postgres | mirror.gcr.io/library/postgres:16-alpine | 5432 | database |
-| redis | mirror.gcr.io/library/redis:7-alpine | 6379 | cache |
 | web | mirror.gcr.io/library/node:22-alpine | 3000 | web |
 | worker | mirror.gcr.io/library/node:22-alpine | 3000 | worker |
-
-### Inter-pod environment variables
-
-- `web` pod: `DATABASE_URL=postgresql://postgres:postgres@${postgres:5432}/stresstest?schema=public`
-- `web` pod: `REDIS_URL=redis://${redis:6379}`
-- `worker` pod: `DATABASE_URL=postgresql://postgres:postgres@${postgres:5432}/stresstest?schema=public`
-- `worker` pod: `REDIS_URL=redis://${redis:6379}`
+| postgres | mirror.gcr.io/library/postgres:16-alpine | 5432 | database |
+| redis | mirror.gcr.io/library/redis:7-alpine | 6379 | cache |
 
 ### Deployment notes
 
-- The web and worker pods use the same image but are distinguished by the POD_ROLE environment variable.
-- Inter-pod communication uses ${postgres:5432} and ${redis:6379} syntax.
-- Official images are mirrored via mirror.gcr.io to comply with Nexlayer namespace rules.
+- Single Docker image used for both 'web' and 'worker' pods, differentiated by the POD_ROLE environment variable.
+- Inter-pod communication for DB is via ${postgres:5432} and Redis via ${redis:6379}.
+- Postgres and Redis must be healthy before the web and worker pods start to avoid Prisma connection failures.
 
 <!-- nexlayer:end -->
 
 ## Build Notes
 <!-- nexlayer:section user-editable=build_notes -->
-**2026-06-12 — fix failed deploy (worker + verify/routing):**
-
-- Nexlayer builds ONE image for both the `web` and `worker` pods (both carry the
-  `# filled by pipeline` placeholder) and does **not** honor a `command:` field.
-  So the image runs both roles via the `POD_ROLE` env var: `web` → `node
-  server.js`, `worker` → `tsx src/worker/index.ts`.
-- Runtime image now ships the full `node_modules` (incl. `tsx` + prisma CLI) and
-  `src/` next to the Next.js standalone bundle. The previous web-only image had
-  no `tsx`/worker source, so the worker pod crashed on boot.
-- The `web` role starts the HTTP server **immediately** and runs `prisma migrate
-  deploy` in the **background** with retries. Blocking boot on migrations risked
-  the verify step's "app URL did not resolve (connecting)" timeout when Postgres
-  was still starting; `/` (redirect → `/login`) and `/api/health` answer without
-  the DB, so routing comes up fast.
-- Removed the Dockerfile `ROOT_URL` host-rewrite hack — `DATABASE_URL` /
-  `REDIS_URL` come from the `${postgres:5432}` / `${redis:6379}` inter-pod refs.
+<!-- Add notes for future builds here — preserved across re-analysis -->
 <!-- nexlayer:end -->
 
 ## Nexlayer Configuration
 <!-- nexlayer:section agent-managed=nexlayer_config -->
-**Last deployed:** 2026-06-12T16:42:44Z  
+**Last deployed:** 2026-06-12T19:51:24Z  
 **Live URL:** https://vast-flare-deployment-stress-test-app.nexlayer.ai  
 **Runtime:** node · **Port:** 3000  
 **Deploy branch:** main  
@@ -227,9 +210,9 @@ application:
         - 3000
       vars:
         NODE_ENV: production
-        POD_ROLE: web
         PORT: "3000"
         HOSTNAME: "0.0.0.0"
+        POD_ROLE: web
         APP_URL: "<% URL %>"
         AUTH_SECRET: "change-me-to-a-long-random-string-at-least-32-chars"
         DATABASE_URL: "postgresql://postgres:postgres@${postgres:5432}/stresstest?schema=public"
@@ -239,6 +222,7 @@ application:
         UPLOAD_DIR: "/app/uploads"
     - name: worker
       image: "# filled by pipeline"
+      path: /
       vars:
         NODE_ENV: production
         POD_ROLE: worker
@@ -268,6 +252,6 @@ application:
 <!-- nexlayer:section agent-managed=build_history -->
 | Date | Status | Notes |
 |------|--------|-------|
-| 2026-06-12T16:36:35Z | analyzed | initial repo analysis |
-| 2026-06-12T16:42:44Z | success | deployed https://vast-flare-deployment-stress-test-app.nexlayer.ai |
+| 2026-06-12T19:44:04Z | analyzed | initial repo analysis |
+| 2026-06-12T19:51:24Z | success | deployed https://vast-flare-deployment-stress-test-app.nexlayer.ai |
 <!-- nexlayer:end -->
