@@ -1,0 +1,116 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  name         String?
+  role         String    @default("user")
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  uploads      Upload[]
+  webhooks     WebhookEndpoint[]
+  jobs         JobRecord[]
+}
+
+model Upload {
+  id           String   @id @default(cuid())
+  userId       String?
+  user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  originalName String
+  storedName   String
+  mimeType     String
+  sizeBytes    Int
+  checksum     String
+  createdAt    DateTime @default(now())
+
+  @@index([userId])
+}
+
+// Outgoing webhook subscriptions: the app POSTs to these URLs when events fire.
+model WebhookEndpoint {
+  id         String              @id @default(cuid())
+  userId     String?
+  user       User?               @relation(fields: [userId], references: [id], onDelete: SetNull)
+  url        String
+  eventType  String
+  secret     String
+  active     Boolean             @default(true)
+  createdAt  DateTime            @default(now())
+
+  deliveries WebhookDelivery[]
+
+  @@index([eventType])
+}
+
+model WebhookDelivery {
+  id           String          @id @default(cuid())
+  endpointId   String
+  endpoint     WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  eventType    String
+  payload      Json
+  status       String          @default("pending") // pending | success | failed
+  responseCode Int?
+  attempts     Int             @default(0)
+  lastError    String?
+  createdAt    DateTime        @default(now())
+  deliveredAt  DateTime?
+
+  @@index([endpointId])
+  @@index([status])
+}
+
+// Persisted record of background jobs so the UI can show their lifecycle.
+model JobRecord {
+  id          String    @id @default(cuid())
+  userId      String?
+  user        User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  queue       String
+  type        String
+  status      String    @default("queued") // queued | active | completed | failed
+  payload     Json
+  result      Json?
+  error       String?
+  createdAt   DateTime  @default(now())
+  startedAt   DateTime?
+  finishedAt  DateTime?
+
+  @@index([status])
+  @@index([type])
+}
+
+// Structured application logs surfaced in the logs dashboard.
+model LogEntry {
+  id        String   @id @default(cuid())
+  level     String   @default("info") // debug | info | warn | error
+  source    String   @default("app")
+  message   String
+  context   Json?
+  createdAt DateTime @default(now())
+
+  @@index([level])
+  @@index([source])
+  @@index([createdAt])
+}
+
+// Sent emails, recorded for the dashboard / debugging.
+model EmailMessage {
+  id        String    @id @default(cuid())
+  to        String
+  subject   String
+  body      String
+  status    String    @default("queued") // queued | sent | failed
+  error     String?
+  createdAt DateTime  @default(now())
+  sentAt    DateTime?
+
+  @@index([status])
+}
