@@ -1,56 +1,60 @@
-# syntax=docker/dockerfile:1
-
-############################
-# 1. Install dependencies  #
-############################
-FROM node:20-alpine AS deps
+# ── Build stage ───────────────────────────────────────────────────────────────
+FROM mirror.gcr.io/library/node:22-alpine AS builder
 WORKDIR /app
 RUN apk add --no-cache libc6-compat openssl
-COPY package.json package-lock.json* ./
+COPY package*.json ./
 COPY prisma ./prisma
-RUN npm install
-
-############################
-# 2. Build the Next.js app #
-############################
-FROM node:20-alpine AS builder
-WORKDIR /app
-RUN apk add --no-cache libc6-compat openssl
-COPY --from=deps /app/node_modules ./node_modules
+RUN npm ci
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN npx prisma generate && npm run build
+ENV NODE_OPTIONS="--max-old-space-size=8192"
+RUN npm run build
 
-############################################
-# 3. Minimal runtime for the Next.js server #
-############################################
-FROM node:20-alpine AS runner
+# ── Runtime stage ───────────────────────────────────────────────────────────────
+# Nexlayer builds ONE image and patches it into every pod that has the
+# "# filled by pipeline" placeholder (here: both `web` and `worker`). It also
+# does NOT honor a `command:` field, so a single image must be able to run BOTH
+# the web server and the BullMQ worker, choosing its role via the POD_ROLE env
+# var (set per-pod in nexlayer.yaml).
+FROM mirror.gcr.io/library/node:22-alpine
 WORKDIR /app
 RUN apk add --no-cache openssl
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001
+ENV HOSTNAME=0.0.0.0
+ENV PORT=3000
+ENV POD_ROLE=web
 
-# Next.js standalone output bundles only what the server needs.
+# Next.js standalone bundle for the web server (provides /app/server.js).
 COPY --from=builder /app/public ./public
-COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
-COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+
+# Full deps + worker source so the SAME image can also run the worker and
+# `prisma migrate deploy`. tsx and the prisma CLI live in node_modules; copying
+# the complete tree over the trimmed standalone one keeps server.js working too.
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/src ./src
 COPY --from=builder /app/prisma ./prisma
-RUN mkdir -p /app/uploads && chown -R nextjs:nodejs /app/uploads
+COPY --from=builder /app/package.json ./package.json
+COPY --from=builder /app/tsconfig.json ./tsconfig.json
+COPY --from=builder /app/next.config.mjs ./next.config.mjs
 
-USER nextjs
+RUN mkdir -p /app/uploads
+
+# One entrypoint, two roles. DATABASE_URL / REDIS_URL come straight from the
+# nexlayer.yaml inter-pod refs (${postgres:5432} / ${redis:6379}) — no runtime
+# host rewriting.
+RUN printf '%s\n' \
+    '#!/bin/sh' \
+    'set -e' \
+    'if [ "$POD_ROLE" = "worker" ]; then' \
+    '  exec node_modules/.bin/tsx src/worker/index.ts' \
+    'fi' \
+    '# web role: apply pending migrations, then start the server' \
+    'node_modules/.bin/prisma migrate deploy' \
+    'exec node server.js' \
+    > /nx-start.sh && chmod +x /nx-start.sh
+
 EXPOSE 3000
-ENV PORT=3000 HOSTNAME=0.0.0.0
-CMD ["node", "server.js"]
-
-############################################
-# 4. Worker image (background job processor) #
-############################################
-FROM node:20-alpine AS worker
-WORKDIR /app
-RUN apk add --no-cache libc6-compat openssl
-ENV NODE_ENV=production
-COPY --from=deps /app/node_modules ./node_modules
-COPY . .
-RUN npx prisma generate
-CMD ["node_modules/.bin/tsx", "src/worker/index.ts"]
+ENTRYPOINT ["/bin/sh", "/nx-start.sh"]
