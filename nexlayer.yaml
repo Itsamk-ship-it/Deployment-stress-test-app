@@ -8,6 +8,7 @@ application:
         - 3000
       vars:
         NODE_ENV: production
+        POD_ROLE: web
         PORT: "3000"
         HOSTNAME: "0.0.0.0"
         APP_URL: "<% URL %>"
@@ -21,13 +22,13 @@ application:
       image: "# filled by pipeline"
       vars:
         NODE_ENV: production
+        POD_ROLE: worker
         APP_URL: "<% URL %>"
         DATABASE_URL: "postgresql://postgres:postgres@${postgres:5432}/stresstest?schema=public"
         REDIS_URL: "redis://${redis:6379}"
         WEBHOOK_SECRET: "change-me-webhook-secret"
         EMAIL_FROM: "Stress Test <no-reply@stresstest.local>"
         UPLOAD_DIR: "/app/uploads"
-      command: "node_modules/.bin/tsx src/worker/index.ts"
     - name: postgres
       image: mirror.gcr.io/library/postgres:16-alpine
       servicePorts:
