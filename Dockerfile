@@ -35,9 +35,14 @@ RUN mkdir -p /app/uploads
 RUN printf '%s\n' \
     '#!/bin/sh' \
     'set -e' \
+    '# Dedicated worker pod (only if one is ever provisioned with POD_ROLE=worker).' \
     'if [ "$POD_ROLE" = "worker" ]; then' \
     '  exec node_modules/.bin/tsx src/worker/index.ts' \
     'fi' \
+    '# web role: apply migrations (background, retry until Postgres is up), then run' \
+    '# the BullMQ worker embedded in this pod. The HTTP server starts immediately so' \
+    '# routing/verify passes fast. The worker runs here so there is NO separate' \
+    '# worker pod (a portless worker pod produces an invalid Kubernetes Service).' \
     '(' \
     '  i=0' \
     '  until node_modules/.bin/prisma migrate deploy; do' \
@@ -46,6 +51,8 @@ RUN printf '%s\n' \
     '    echo "[start] waiting for database before migrate (try $i)..."' \
     '    sleep 3' \
     '  done' \
+    '  echo "[start] migrations applied; starting embedded worker"' \
+    '  exec node_modules/.bin/tsx src/worker/index.ts' \
     ') &' \
     'exec node server.js' \
     > /nx-start.sh && chmod +x /nx-start.sh

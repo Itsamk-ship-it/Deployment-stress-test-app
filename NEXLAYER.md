@@ -170,69 +170,69 @@ application:
 
 ## Nexlayer Deployment Plan
 <!-- nexlayer:section user-editable=deployment_plan -->
-### Pod Topology
+### Pod Topology — EXACTLY three pods
 
 | Pod | Image | Port | Role |
 |-----|-------|------|------|
-| web | built app image, `POD_ROLE=web` | 3000 (`path: /`) | Next.js web server |
-| worker | same built app image, `POD_ROLE=worker` | none (no public port, no path) | BullMQ background worker |
+| web | built app image, `POD_ROLE=web` | 3000 (`path: /`) | Next.js web server **+ embedded BullMQ worker** |
 | postgres | mirror.gcr.io/library/postgres:16-alpine | 5432 | database |
 | redis | mirror.gcr.io/library/redis:7-alpine | 6379 | cache |
 
+> **DO NOT add a separate `worker` pod.** The background worker has no listening
+> port, and Nexlayer creates a Kubernetes Service per pod — a portless pod fails
+> the deploy with `Service is invalid`. The worker runs **inside the web pod**
+> (started in the background by the entrypoint). Generate exactly these 3 pods.
+
 ### HARD REQUIREMENTS — do not regress these (each one is a past deploy failure)
 
-> The `web` and `worker` pods are both built from the **single** app image
-> (`image: "# filled by pipeline"`). When regenerating the Dockerfile and
-> `nexlayer.yaml`, the generated config MUST satisfy all of the following.
-
-1. **One image, two roles via `POD_ROLE` — never a `command:` field.** Nexlayer
-   ignores a pod `command:`, so it must NOT be used. The image entrypoint
-   branches on `$POD_ROLE`: `web` → `node server.js`; `worker` →
-   `node_modules/.bin/tsx src/worker/index.ts`. Set `POD_ROLE: web` on the web
-   pod and `POD_ROLE: worker` on the worker pod. *(Past failure: the worker pod
-   ran the web `CMD` instead of the worker.)*
+1. **No separate `worker` pod; never a `command:` field.** The web pod runs both
+   the server and the worker via its entrypoint (see below). A standalone worker
+   pod has no `servicePorts` → `create service ...-worker-service: Service is
+   invalid` → whole deploy fails. *(Past failure: deploy failed creating the
+   worker Service.)*
 
 2. **Runtime image must include the FULL `node_modules` (incl. `tsx` and the
    prisma CLI) AND `src/`** alongside the Next.js standalone bundle. A web-only
    standalone image has no `tsx`/worker source, so the worker and migrations
-   cannot run. *(Past failure: worker crashed on boot.)*
+   cannot run. *(Past failure: worker crashed / migrations missing.)*
 
 3. **The web server must start IMMEDIATELY — never block boot on the database.**
    Do NOT wait for Postgres/Redis health before starting, and do NOT run
    `prisma migrate deploy` in the foreground before `node server.js`. Run
-   `prisma migrate deploy` in the BACKGROUND with retries, then `exec node
-   server.js`. The platform's verify/health check hits `/` (redirects to
-   `/login`, no DB) and `/api/health` (returns 200, no dependencies), so the
-   server must be listening within seconds regardless of DB state. *(Past
-   failure: "app URL did not resolve (connecting) — routing not provisioned",
-   caused by gating web startup on the database.)*
+   migrations in the BACKGROUND, then `exec node server.js`. The verify/health
+   check hits `/` (redirects to `/login`, no DB) and `/api/health` (200, no
+   deps), so the server must listen within seconds regardless of DB state.
+   *(Past failure: "app URL did not resolve (connecting)", caused by gating web
+   startup on the database.)*
 
 4. **DB/Redis connectivity comes ONLY from `nexlayer.yaml` inter-pod refs.** Use
    `DATABASE_URL: "postgresql://postgres:postgres@${postgres:5432}/stresstest?schema=public"`
    and `REDIS_URL: "redis://${redis:6379}"`. Do NOT add a `ROOT_URL`
-   host-rewrite hack or any runtime rewriting of `DATABASE_URL`/`REDIS_URL` in
-   the Dockerfile entrypoint. *(Past failure: the hack pointed Prisma/Redis at
-   non-existent `*-service` hostnames.)*
+   host-rewrite hack or any runtime rewriting of `DATABASE_URL`/`REDIS_URL`.
+   *(Past failure: the hack pointed Prisma/Redis at non-existent hostnames.)*
 
 5. **Only the `web` pod is routed.** `web`: `servicePorts: [3000]`, `path: /`.
-   `worker`: no `servicePorts`, no `path`.
+   `postgres`/`redis` have `servicePorts` but no `path`.
 
-### Canonical entrypoint (web + worker in one image)
+### Canonical entrypoint (web server + embedded worker in one pod)
 
 ```sh
 #!/bin/sh
 set -e
+# Only used if a dedicated worker pod is ever provisioned (not recommended).
 if [ "$POD_ROLE" = "worker" ]; then
   exec node_modules/.bin/tsx src/worker/index.ts
 fi
 # web role: apply migrations in the BACKGROUND (retry until Postgres is up),
-# start the HTTP server immediately so routing/verify passes fast.
+# then start the embedded worker. Start the HTTP server immediately.
 (
   i=0
   until node_modules/.bin/prisma migrate deploy; do
     i=$((i+1)); [ "$i" -ge 40 ] && break
     echo "[start] waiting for database before migrate (try $i)..."; sleep 3
   done
+  # migrations done — run the BullMQ worker embedded in this pod
+  exec node_modules/.bin/tsx src/worker/index.ts
 ) &
 exec node server.js
 ```
@@ -251,16 +251,21 @@ exec node server.js
   `package.json`, `next.config.mjs`. Copy the full `node_modules` over the
   trimmed standalone one so `server.js` still works and the worker/migrations
   can run.
-- `ENV POD_ROLE=web` as the default; the worker pod overrides it to `worker`.
-- Entrypoint = the canonical script in the Deployment Plan above (role branch +
-  background migrate + `exec node server.js`). No `command:` in `nexlayer.yaml`.
+- `ENV POD_ROLE=web` as the default. There is no worker pod — the web entrypoint
+  runs the worker in the background after migrations (embedded).
+- Entrypoint = the canonical script in the Deployment Plan above (background
+  migrate → embedded worker; `exec node server.js`). No `command:` in
+  `nexlayer.yaml`. Generate exactly 3 pods: `web`, `postgres`, `redis`.
 - No `ROOT_URL` rewriting. `EXPOSE 3000`. Base image
   `mirror.gcr.io/library/node:22-alpine`.
 
-**Why verify kept failing:** the web pod was being gated on DB readiness, so the
-HTTP server wasn't listening inside the 2-minute verify window → "app URL did
-not resolve (connecting)". Fix = start `node server.js` immediately, migrate in
-the background. `/` and `/api/health` answer without the DB.
+**Two failures this fixes:**
+- *Deploy failed: `create service ...-worker-service: Service is invalid`* — a
+  separate worker pod has no port; Nexlayer makes a Service per pod and rejects a
+  portless one. Fix = no worker pod; embed the worker in the web pod.
+- *"app URL did not resolve (connecting)"* — web was gated on DB readiness. Fix =
+  start `node server.js` immediately, migrate in the background. `/` and
+  `/api/health` answer without the DB.
 <!-- nexlayer:end -->
 
 ## Nexlayer Configuration
